@@ -611,6 +611,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         })
       }
 
+      function sanitizeInternalMarkers(text: string): string {
+        return text
+          .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+          .replace(/<task_metadata>[\s\S]*?<\/task_metadata>/gi, "")
+          .replace(/<!--\s*OMO_INTERNAL_INITIATOR\s*-->/gi, "")
+          .replace(/\[SYSTEM DIRECTIVE: OH-MY-OPENCODE[^\]]*\]/gi, "")
+          .replace(/\[(?:ALL\s+)?BACKGROUND TASKS? COMPLETE\]/gi, "")
+          .replace(/\[BACKGROUND TASK COMPLETED\]/gi, "")
+          .replace(/SUPERVISED TASK (?:COMPLETED SUCCESSFULLY|FAILED \([^)]+\)|TIMED OUT)/gi, "")
+          .replace(/\s*⚙\s*background_output\s*\[task_id=[^\]]+\]\s*/g, " ")
+      }
+
       // --- Tool block summarization ---
       // Converts structured tool_use/tool_result blocks into concise XML-wrapped
       // summaries that Claude treats as metadata and won't echo back to the user.
@@ -621,7 +633,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           return `<tool_exec name="${block.name}"${descSuffix} />`
         }
         if (block.type === "tool_result") {
-          const raw = typeof block.content === "string" ? block.content : JSON.stringify(block.content)
+          const rawUnfiltered = typeof block.content === "string" ? block.content : JSON.stringify(block.content)
+          const raw = sanitizeInternalMarkers(rawUnfiltered)
           const configuredLimitRaw = process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS?.trim() || ""
           const configuredLimit = Number.parseInt(configuredLimitRaw, 10)
           const disableLimit = configuredLimitRaw === "0" || /^(none|off|unlimited)$/i.test(configuredLimitRaw)
@@ -672,16 +685,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // Convert assistant messages to text summaries
               let text: string
               if (typeof m.content === "string") {
-                text = `[Assistant: ${m.content}]`
+                text = `[Assistant: ${sanitizeInternalMarkers(m.content)}]`
               } else if (Array.isArray(m.content)) {
                 text = m.content.map((b: any) => {
-                  if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
+                  if (b.type === "text" && b.text) return `[Assistant: ${sanitizeInternalMarkers(String(b.text))}]`
                   if (b.type === "tool_use") return summarizeToolBlock(b)
                   if (b.type === "tool_result") return summarizeToolBlock(b)
                   return ""
                 }).filter(Boolean).join("\n")
               } else {
-                text = `[Assistant: ${String(m.content)}]`
+                text = `[Assistant: ${sanitizeInternalMarkers(String(m.content))}]`
               }
               structured.push({
                 type: "user" as const,
@@ -700,11 +713,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             const role = m.role === "assistant" ? "Assistant" : "Human"
             let content: string
             if (typeof m.content === "string") {
-              content = m.content
+              content = sanitizeInternalMarkers(m.content)
             } else if (Array.isArray(m.content)) {
               content = m.content
                 .map((block: any) => {
-                  if (block.type === "text" && block.text) return block.text
+                  if (block.type === "text" && block.text) return sanitizeInternalMarkers(String(block.text))
                   if (block.type === "tool_use") return summarizeToolBlock(block)
                   if (block.type === "tool_result") return summarizeToolBlock(block)
                   if (block.type === "image") return "[Image attached]"
@@ -715,7 +728,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 .filter(Boolean)
                 .join("\n")
             } else {
-              content = String(m.content)
+              content = sanitizeInternalMarkers(String(m.content))
             }
             return `${role}: ${content}`
           })
@@ -852,6 +865,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // Preserve ALL content blocks (text, tool_use, thinking, etc.)
                 for (const block of message.message.content) {
                   const b = block as Record<string, unknown>
+                  if (b.type === "text" && typeof b.text === "string") {
+                    b.text = sanitizeInternalMarkers(b.text)
+                    if (!b.text) continue
+                  }
                   // In passthrough mode, strip MCP prefix from tool names
                   if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
                     b.name = stripMcpPrefix(b.name as string)
@@ -1129,19 +1146,24 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       }
                     }
 
+                    if (eventType === "content_block_delta") {
+                      const delta = (event as any).delta
+                      if (delta?.type === "text_delta") {
+                        const sanitizedText = sanitizeInternalMarkers(String(delta.text || ""))
+                        if (!sanitizedText) {
+                          continue
+                        }
+                        delta.text = sanitizedText
+                        textEventsForwarded += 1
+                      }
+                    }
+
                     // Forward all other events (text, non-MCP tool_use like Task, message events)
                     const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`)
                     if (!safeEnqueue(payload, `stream_event:${eventType}`)) {
                       break
                     }
                     eventsForwarded += 1
-
-                    if (eventType === "content_block_delta") {
-                      const delta = (event as any).delta
-                      if (delta?.type === "text_delta") {
-                        textEventsForwarded += 1
-                      }
-                    }
                   }
                 }
               } finally {

@@ -145,6 +145,36 @@ describe("Phase 3: Concurrent request support", () => {
     expect(b1.content[0].text).toBe("OK")
     expect(b2.content[0].text).toBe("OK")
   })
+
+  it("should strip internal system-reminder markers from streamed text deltas", async () => {
+    mockMessages = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "Before <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> ⚙ background_output [task_id=bg_123] After <!-- OMO_INTERNAL_INITIATOR -->"),
+      blockStop(0),
+      messageDelta("end_turn"),
+      messageStop(),
+    ]
+
+    const app = createTestApp()
+    const response = await postMessages(app, makeRequest({ stream: true }))
+    const text = await readStreamFull(response)
+    const events = parseSSE(text)
+    const deltas = events
+      .filter((e) => e.event === "content_block_delta")
+      .map((e) => (e.data as any).delta?.text)
+      .filter(Boolean)
+      .join("\n")
+
+    expect(deltas).toContain("Before")
+    expect(deltas).toContain("After")
+    expect(deltas).not.toContain("<system-reminder>")
+    expect(deltas).not.toContain("ALL BACKGROUND TASKS COMPLETE")
+    expect(deltas).not.toContain("SYSTEM DIRECTIVE: OH-MY-OPENCODE")
+    expect(deltas).not.toContain("<task_metadata>")
+    expect(deltas).not.toContain("background_output [task_id=")
+    expect(deltas).not.toContain("OMO_INTERNAL_INITIATOR")
+  })
 })
 
 // ============================================================
@@ -159,6 +189,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
   })
 
   it("should include tool_use blocks from assistant messages in prompt", async () => {
+    const unique = crypto.randomUUID()
     mockMessages = [
       assistantMessage([{ type: "text", text: "Here are the contents." }]),
     ]
@@ -167,7 +198,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     const response = await postMessages(app, makeRequest({
       stream: false,
       messages: [
-        { role: "user", content: "Read test.ts" },
+        { role: "user", content: `Read test.ts ${unique}` },
         {
           role: "assistant",
           content: [
@@ -304,6 +335,73 @@ describe("Phase 3: Tool result in follow-up requests", () => {
         process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS = previousSummaryChars
       }
     }
+  })
+
+  it("should strip internal system-reminder markers from reconstructed prompt", async () => {
+    mockMessages = [
+      assistantMessage([{ type: "text", text: "Acknowledged." }]),
+    ]
+
+    const app = createTestApp()
+    const response = await postMessages(app, makeRequest({
+      stream: false,
+      messages: [
+        {
+          role: "assistant",
+          content: "Waiting. <system-reminder>ALL BACKGROUND TASKS COMPLETE\nUse background_output</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> ⚙ background_output [task_id=bg_123] Continue. <!-- OMO_INTERNAL_INITIATOR -->",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_bg",
+              content: "H: <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - ULTRAWORK LOOP VERIFICATION 1/1] <task_metadata>task_id: ses_x</task_metadata> A: ⚙ background_output [task_id=bg_123] <!-- OMO_INTERNAL_INITIATOR -->",
+            },
+          ],
+        },
+      ],
+    }))
+    await response.json()
+
+    const prompt = String(capturedQueryParams.prompt)
+    expect(prompt).not.toContain("<system-reminder>")
+    expect(prompt).not.toContain("ALL BACKGROUND TASKS COMPLETE")
+    expect(prompt).not.toContain("SYSTEM DIRECTIVE: OH-MY-OPENCODE")
+    expect(prompt).not.toContain("<task_metadata>")
+    expect(prompt).not.toContain("background_output [task_id=")
+    expect(prompt).not.toContain("OMO_INTERNAL_INITIATOR")
+    expect(prompt).toContain("Waiting.")
+    expect(prompt).toContain("Continue.")
+  })
+
+  it("should preserve OpenCode-style tool markers in passthrough mode", async () => {
+    mockMessages = [
+      assistantMessage([{ type: "text", text: "Done." }]),
+    ]
+
+    const app = createTestApp()
+    const response = await postMessages(app, makeRequest({
+      stream: false,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "mcp__oc__todowrite", input: { todos: [] } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+          ],
+        },
+      ],
+    }))
+    await response.json()
+
+    const prompt = String(capturedQueryParams.prompt)
+    expect(prompt).toContain("mcp__oc__todowrite")
   })
 })
 
