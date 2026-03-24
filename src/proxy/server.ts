@@ -586,7 +586,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         if (knownCount > 0 && knownCount < allMessages.length) {
           messagesToConvert = allMessages.slice(knownCount)
         } else {
-          messagesToConvert = getLastUserMessage(allMessages)
+          // knownCount is 0 or >= allMessages.length — treat as cache miss to avoid losing context
+          messagesToConvert = allMessages
         }
       } else {
         messagesToConvert = allMessages
@@ -598,6 +599,38 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
       )
 
+      // --- Loop detection circuit breaker ---
+      // Detect when the model repeatedly calls the same tool with identical args.
+      // Inspired by oh-my-openagent's loop-detector pattern.
+      const LOOP_THRESHOLD = 3
+      let loopDetected = false
+      if (allMessages.length >= LOOP_THRESHOLD * 2) {
+        const toolCalls: string[] = []
+        for (const m of allMessages) {
+          if (m.role === "assistant" && Array.isArray(m.content)) {
+            for (const b of m.content) {
+              if ((b as any).type === "tool_use" && (b as any).name) {
+                const sig = `${(b as any).name}::${JSON.stringify((b as any).input || {})}`
+                toolCalls.push(sig)
+              }
+            }
+          }
+        }
+        if (toolCalls.length >= LOOP_THRESHOLD) {
+          const last = toolCalls[toolCalls.length - 1]
+          let consecutive = 0
+          for (let i = toolCalls.length - 1; i >= 0; i--) {
+            if (toolCalls[i] === last) consecutive++
+            else break
+          }
+          if (consecutive >= LOOP_THRESHOLD) {
+            loopDetected = true
+            const toolName = last?.split("::")[0] || "unknown"
+            systemContext += `\n\nCRITICAL: You have called the tool "${toolName}" ${consecutive} times consecutively with identical arguments. This is a loop. You MUST take a different action, use different arguments, or explain the situation to the user instead of calling the same tool again.`
+            console.error(`[PROXY] Loop detected: ${toolName} called ${consecutive}x consecutively in session ${opencodeSessionId}`)
+          }
+        }
+      }
       // Strip cache_control from content blocks — the SDK manages its own caching
       // and OpenCode's ttl='1h' blocks conflict with the SDK's ttl='5m' blocks
       function stripCacheControl(content: any): any {
@@ -662,12 +695,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const structured: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> = []
 
         if (isResume) {
-          // Resume: only send user messages from the delta (SDK has the rest)
+          // Resume: send user messages AND assistant messages from the delta.
+          // In passthrough mode (maxTurns=1), each query() is a fresh subprocess
+          // with no memory of prior turns — assistant tool_use context MUST be included
+          // or the model will re-issue the same tool call (loop).
           for (const m of messagesToConvert) {
             if (m.role === "user") {
               structured.push({
                 type: "user" as const,
                 message: { role: "user" as const, content: stripCacheControl(m.content) },
+                parent_tool_use_id: null,
+              })
+            } else {
+              // Convert assistant messages to text summaries (preserves tool_use context)
+              let text: string
+              if (typeof m.content === "string") {
+                text = `[Assistant: ${sanitizeInternalMarkers(m.content)}]`
+              } else if (Array.isArray(m.content)) {
+                text = m.content.map((b: any) => {
+                  if (b.type === "text" && b.text) return `[Assistant: ${sanitizeInternalMarkers(String(b.text))}]`
+                  if (b.type === "tool_use") return summarizeToolBlock(b)
+                  if (b.type === "tool_result") return summarizeToolBlock(b)
+                  return ""
+                }).filter(Boolean).join("\n")
+              } else {
+                text = `[Assistant: ${sanitizeInternalMarkers(String(m.content))}]`
+              }
+              structured.push({
+                type: "user" as const,
+                message: { role: "user" as const, content: text },
                 parent_tool_use_id: null,
               })
             }
