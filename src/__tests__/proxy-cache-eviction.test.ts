@@ -60,7 +60,9 @@ async function post(app: TestApp, body: Record<string, unknown>, headers: Record
 
 async function send(app: TestApp, session: string | undefined, firstMessage: string, sessionId: string) {
   queuedSessionIds.push(sessionId)
-  const headers = session ? { "x-opencode-session": session } : {}
+  const headers: Record<string, string> | undefined = session
+    ? { "x-opencode-session": session }
+    : undefined
   const response = await post(app, {
     model: "claude-sonnet-4-5",
     max_tokens: 128,

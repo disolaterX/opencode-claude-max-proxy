@@ -513,6 +513,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const model = mapModelToClaudeModel(body.model || "sonnet")
         const stream = body.stream ?? true
         const workingDirectory = process.env.CLAUDE_PROXY_WORKDIR || process.cwd()
+        const passthrough = Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH)
 
         // Strip env vars that cause SDK subprocess to load unwanted plugins/features
         const { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, ...cleanEnv } = process.env
@@ -610,6 +611,34 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         })
       }
 
+      // --- Tool block summarization ---
+      // Converts structured tool_use/tool_result blocks into concise XML-wrapped
+      // summaries that Claude treats as metadata and won't echo back to the user.
+      function summarizeToolBlock(block: any): string {
+        if (block.type === "tool_use") {
+          const desc = block.input?.description || block.input?.query || block.input?.pattern || ""
+          const descSuffix = desc ? ` — ${String(desc).slice(0, 120)}` : ""
+          return `<tool_exec name="${block.name}"${descSuffix} />`
+        }
+        if (block.type === "tool_result") {
+          const raw = typeof block.content === "string" ? block.content : JSON.stringify(block.content)
+          const configuredLimitRaw = process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS?.trim() || ""
+          const configuredLimit = Number.parseInt(configuredLimitRaw, 10)
+          const disableLimit = configuredLimitRaw === "0" || /^(none|off|unlimited)$/i.test(configuredLimitRaw)
+          const defaultLimit = passthrough ? undefined : 300
+          const summaryLimit = disableLimit
+            ? undefined
+            : (Number.isFinite(configuredLimit) && configuredLimit > 0
+              ? configuredLimit
+              : defaultLimit)
+          const trimmed = typeof summaryLimit === "number" && raw.length > summaryLimit
+            ? raw.slice(0, summaryLimit) + "…"
+            : raw
+          return `<tool_output for="${block.tool_use_id || "unknown"}">${trimmed}</tool_output>`
+        }
+        return ""
+      }
+
       // Build the prompt — either structured (multimodal) or text
       let prompt: string | AsyncIterable<any>
 
@@ -647,8 +676,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               } else if (Array.isArray(m.content)) {
                 text = m.content.map((b: any) => {
                   if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
-                  if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
-                  if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
+                  if (b.type === "tool_use") return summarizeToolBlock(b)
+                  if (b.type === "tool_result") return summarizeToolBlock(b)
                   return ""
                 }).filter(Boolean).join("\n")
               } else {
@@ -676,8 +705,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               content = m.content
                 .map((block: any) => {
                   if (block.type === "text" && block.text) return block.text
-                  if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
-                  if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
+                  if (block.type === "tool_use") return summarizeToolBlock(block)
+                  if (block.type === "tool_result") return summarizeToolBlock(block)
                   if (block.type === "image") return "[Image attached]"
                   if (block.type === "document") return "[Document attached]"
                   if (block.type === "file") return "[File attached]"
@@ -700,7 +729,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // When enabled, ALL tool execution is forwarded to OpenCode instead of
       // being handled internally. This enables multi-model agent delegation
       // (e.g., oracle on GPT-5.2, explore on Gemini via oh-my-opencode).
-      const passthrough = Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH)
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
 
       // In passthrough mode, register OpenCode's tools as MCP tools so Claude

@@ -80,6 +80,13 @@ async function post(
   await response.json()
 }
 
+function getCapturedResumeToken(): string | undefined {
+  if (!capturedQueryParams) {
+    throw new Error("Expected query params to be captured")
+  }
+  return capturedQueryParams.options?.resume
+}
+
 beforeEach(() => {
   mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
   capturedQueryParams = null
@@ -139,7 +146,7 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "Remember: Flobulator" },
     ], "sdk-1")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
+    expect(getCapturedResumeToken()).toBe("sdk-1")
   })
 
   it("does NOT resume after undo (same message count, different content)", async () => {
@@ -166,7 +173,7 @@ describe("Session lineage: undo detection", () => {
     ], "sdk-new")
 
     // Should NOT resume — lineage hash mismatch
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 
   it("does NOT resume after multi-undo (fewer messages)", async () => {
@@ -199,7 +206,7 @@ describe("Session lineage: undo detection", () => {
     ], "sdk-new")
 
     // Should NOT resume — fewer messages than stored + content changed
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 
   it("does NOT resume when earlier message is edited", async () => {
@@ -225,7 +232,7 @@ describe("Session lineage: undo detection", () => {
     ], "sdk-new")
 
     // Should NOT resume — first message was edited, lineage broken
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 
   it("resumes correctly after undo when a NEW session starts", async () => {
@@ -250,7 +257,7 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "forget about X" },
     ], "sdk-2")
 
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
 
     // Now continuing from the NEW session should resume with sdk-2
     await post(app, "sess-1", [
@@ -261,7 +268,7 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "what do you know?" },
     ], "sdk-2")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-2")
+    expect(getCapturedResumeToken()).toBe("sdk-2")
   })
 })
 
@@ -291,7 +298,7 @@ describe("Session lastAccess refresh on lookup", () => {
       { role: "user", content: "still here?" },
     ], "sdk-A")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+    expect(getCapturedResumeToken()).toBe("sdk-A")
 
     // And again — third access to same session, still resumes
     capturedQueryParams = null
@@ -303,7 +310,7 @@ describe("Session lastAccess refresh on lookup", () => {
       { role: "user", content: "one more" },
     ], "sdk-A")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+    expect(getCapturedResumeToken()).toBe("sdk-A")
   })
 })
 
@@ -350,6 +357,6 @@ describe("Session lineage: fingerprint fallback", () => {
     await r2.json()
 
     // Should NOT resume — fingerprint matches but lineage diverged
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 })

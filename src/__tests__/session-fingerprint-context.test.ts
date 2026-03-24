@@ -99,6 +99,13 @@ async function postNoSession(
   }
 }
 
+function getCapturedResumeToken(): string | undefined {
+  if (!capturedQueryParams) {
+    throw new Error("Expected query params to be captured")
+  }
+  return capturedQueryParams.options?.resume
+}
+
 beforeEach(() => {
   mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
   capturedQueryParams = null
@@ -125,7 +132,7 @@ describe("Fingerprint resume with system context", () => {
       { role: "user", content: "how are you?" },
     ], "sdk-1", system)
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
+    expect(getCapturedResumeToken()).toBe("sdk-1")
   })
 
   it("resumes via fingerprint when system context matches (stream)", async () => {
@@ -145,7 +152,7 @@ describe("Fingerprint resume with system context", () => {
       { role: "user", content: "what can you do?" },
     ], "sdk-stream-1", system, true)
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-stream-1")
+    expect(getCapturedResumeToken()).toBe("sdk-stream-1")
   })
 
   it("does NOT resume when system context differs (cross-project isolation)", async () => {
@@ -165,7 +172,7 @@ describe("Fingerprint resume with system context", () => {
     ], "sdk-project-b", "Project: /home/user/project-b")
 
     // Should NOT resume project A's session
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 
   it("does NOT resume when system context is added where there was none", async () => {
@@ -184,7 +191,7 @@ describe("Fingerprint resume with system context", () => {
       { role: "user", content: "help me" },
     ], "sdk-with-system", "You are a helpful assistant.")
 
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCapturedResumeToken()).toBeUndefined()
   })
 
   it("resumes correctly without system context (backward compat)", async () => {
@@ -202,6 +209,6 @@ describe("Fingerprint resume with system context", () => {
       { role: "user", content: "thanks" },
     ], "sdk-no-ctx")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-no-ctx")
+    expect(getCapturedResumeToken()).toBe("sdk-no-ctx")
   })
 })

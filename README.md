@@ -190,6 +190,7 @@ Sessions expire after 24 hours.
 | `CLAUDE_PROXY_WORKDIR`              | (cwd)     | Working directory for Claude and tools                   |
 | `CLAUDE_PROXY_MAX_CONCURRENT`       | 1         | Max concurrent SDK sessions (increase with caution)      |
 | `CLAUDE_PROXY_IDLE_TIMEOUT_SECONDS` | 120       | Connection idle timeout                                  |
+| `CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS` | passthrough: unlimited, internal: `300` | Max characters kept when summarizing `tool_result` blocks for prompt reconstruction (`0`, `none`, `off`, `unlimited` disable truncation) |
 
 ## Concurrency
 
@@ -227,6 +228,7 @@ The Claude Agent SDK uses different parameter names than OpenCode (e.g., `file_p
 | "Connection refused"          | Make sure the proxy is running                                            |
 | "Port 3456 is already in use" | `kill $(lsof -ti :3456)` or use `CLAUDE_PROXY_PORT=4567`                  |
 | Title generation fails        | Set `"small_model": "anthropic/claude-haiku-4-5"` in your OpenCode config |
+| Repeated `Read ... [limit=500]` loops in passthrough | In passthrough, truncation is off by default. If you set `CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS`, raise it or set `0` / `unlimited` |
 
 ## Auto-start (macOS)
 

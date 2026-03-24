@@ -255,6 +255,56 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     expect(prompt).toContain("Unknown agent type")
     expect(prompt).toContain("general-purpose")
   })
+
+  it("should preserve long tool_result context in passthrough mode", async () => {
+    const previousPassthrough = process.env.CLAUDE_PROXY_PASSTHROUGH
+    const previousSummaryChars = process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS
+    process.env.CLAUDE_PROXY_PASSTHROUGH = "1"
+    delete process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS
+
+    try {
+      mockMessages = [
+        assistantMessage([{ type: "text", text: "Done reading." }]),
+      ]
+
+      const longResult = `${"A".repeat(70_000)}__TAIL_MARKER__`
+      const app = createTestApp()
+      const response = await postMessages(app, makeRequest({
+        stream: false,
+        messages: [
+          { role: "user", content: "Read long file" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "toolu_long", name: "Read", input: { file_path: "big.ts" } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_long", content: longResult },
+            ],
+          },
+        ],
+      }))
+
+      await response.json()
+      const prompt = capturedQueryParams.prompt
+      expect(prompt).toContain("__TAIL_MARKER__")
+    } finally {
+      if (previousPassthrough === undefined) {
+        delete process.env.CLAUDE_PROXY_PASSTHROUGH
+      } else {
+        process.env.CLAUDE_PROXY_PASSTHROUGH = previousPassthrough
+      }
+
+      if (previousSummaryChars === undefined) {
+        delete process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS
+      } else {
+        process.env.CLAUDE_PROXY_TOOL_RESULT_SUMMARY_CHARS = previousSummaryChars
+      }
+    }
+  })
 })
 
 // ============================================================
