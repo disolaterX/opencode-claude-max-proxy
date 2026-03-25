@@ -146,11 +146,11 @@ describe("Phase 3: Concurrent request support", () => {
     expect(b2.content[0].text).toBe("OK")
   })
 
-  it("should strip internal system-reminder markers from streamed text deltas", async () => {
+  it("should strip internal orchestration and transcript wrappers from streamed text deltas", async () => {
     mockMessages = [
       messageStart(),
       textBlockStart(0),
-      textDelta(0, "Before <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> ⚙ background_output [task_id=bg_123] After <!-- OMO_INTERNAL_INITIATOR -->"),
+      textDelta(0, "Before <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> <thinking>hidden debug</thinking> H: <tool_output for=\"toolu_1\">internal</tool_output> A: <tool_exec name=\"bash\" /> ⚙ background_output [task_id=bg_123] After <!-- OMO_INTERNAL_INITIATOR -->"),
       blockStop(0),
       messageDelta("end_turn"),
       messageStop(),
@@ -172,7 +172,12 @@ describe("Phase 3: Concurrent request support", () => {
     expect(deltas).not.toContain("ALL BACKGROUND TASKS COMPLETE")
     expect(deltas).not.toContain("SYSTEM DIRECTIVE: OH-MY-OPENCODE")
     expect(deltas).not.toContain("<task_metadata>")
+    expect(deltas).not.toContain("<thinking>")
+    expect(deltas).not.toContain("<tool_output")
+    expect(deltas).not.toContain("<tool_exec")
     expect(deltas).not.toContain("background_output [task_id=")
+    expect(deltas).not.toContain("H:")
+    expect(deltas).not.toContain("A:")
     expect(deltas).not.toContain("OMO_INTERNAL_INITIATOR")
   })
 })
@@ -337,7 +342,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }
   })
 
-  it("should strip internal system-reminder markers from reconstructed prompt", async () => {
+  it("should strip internal orchestration and transcript wrappers from reconstructed prompt", async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Acknowledged." }]),
     ]
@@ -348,7 +353,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
       messages: [
         {
           role: "assistant",
-          content: "Waiting. <system-reminder>ALL BACKGROUND TASKS COMPLETE\nUse background_output</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> ⚙ background_output [task_id=bg_123] Continue. <!-- OMO_INTERNAL_INITIATOR -->",
+          content: "Waiting. <system-reminder>ALL BACKGROUND TASKS COMPLETE\nUse background_output</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] <task_metadata>session_id: ses_x</task_metadata> <thinking>chain-of-thought</thinking> H: <tool_output for=\"toolu_1\">internal</tool_output> A: <tool_exec name=\"bash\" /> ⚙ background_output [task_id=bg_123] Continue. <!-- OMO_INTERNAL_INITIATOR -->",
         },
         {
           role: "user",
@@ -356,7 +361,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
             {
               type: "tool_result",
               tool_use_id: "toolu_bg",
-              content: "H: <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - ULTRAWORK LOOP VERIFICATION 1/1] <task_metadata>task_id: ses_x</task_metadata> A: ⚙ background_output [task_id=bg_123] <!-- OMO_INTERNAL_INITIATOR -->",
+              content: "H: <system-reminder>ALL BACKGROUND TASKS COMPLETE</system-reminder> [SYSTEM DIRECTIVE: OH-MY-OPENCODE - ULTRAWORK LOOP VERIFICATION 1/1] <task_metadata>task_id: ses_x</task_metadata> <thinking>loop</thinking> H: <tool_output for=\"toolu_2\">trace</tool_output> A: <tool_exec name=\"task\" /> A: ⚙ background_output [task_id=bg_123] <!-- OMO_INTERNAL_INITIATOR -->",
             },
           ],
         },
@@ -369,7 +374,12 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     expect(prompt).not.toContain("ALL BACKGROUND TASKS COMPLETE")
     expect(prompt).not.toContain("SYSTEM DIRECTIVE: OH-MY-OPENCODE")
     expect(prompt).not.toContain("<task_metadata>")
+    expect(prompt).not.toContain("<thinking>")
+    expect(prompt).not.toContain("<tool_output for=\"toolu_2\"")
+    expect(prompt).not.toContain("<tool_exec")
     expect(prompt).not.toContain("background_output [task_id=")
+    expect(prompt).not.toContain("H:")
+    expect(prompt).not.toContain("A:")
     expect(prompt).not.toContain("OMO_INTERNAL_INITIATOR")
     expect(prompt).toContain("Waiting.")
     expect(prompt).toContain("Continue.")

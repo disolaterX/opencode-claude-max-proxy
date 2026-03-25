@@ -418,23 +418,21 @@ async function resolveClaudeExecutableAsync(): Promise<string> {
   if (cachedClaudePathPromise) return cachedClaudePathPromise
 
   cachedClaudePathPromise = (async () => {
-    // 1. Try the SDK's bundled cli.js (same dir as this module's SDK)
-    try {
-      const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
-      const sdkCliJs = join(dirname(sdkPath), "cli.js")
-      if (existsSync(sdkCliJs)) {
-        cachedClaudePath = sdkCliJs
-        return sdkCliJs
-      }
-    } catch {}
-
-    // 2. Try the system-installed claude binary
     try {
       const { stdout } = await exec("which claude")
       const claudePath = stdout.trim()
       if (claudePath && existsSync(claudePath)) {
         cachedClaudePath = claudePath
         return claudePath
+      }
+    } catch {}
+
+    try {
+      const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
+      const sdkCliJs = join(dirname(sdkPath), "cli.js")
+      if (existsSync(sdkCliJs)) {
+        cachedClaudePath = sdkCliJs
+        return sdkCliJs
       }
     } catch {}
 
@@ -448,10 +446,42 @@ async function resolveClaudeExecutableAsync(): Promise<string> {
   }
 }
 
-function mapModelToClaudeModel(model: string): "sonnet" | "opus" | "opus[1m]" | "haiku" {
-  if (model.includes("opus")) return "opus[1m]"
+function mapModelToClaudeModel(
+  model: string,
+  subscriptionType?: string
+): "sonnet" | "opus" | "opus[1m]" | "haiku" {
+  if (model.includes("opus")) {
+    if (model.includes("[1m]")) return "opus[1m]"
+    const sub = (subscriptionType || "").toLowerCase()
+    if (sub.includes("max") || sub.includes("premium")) return "opus[1m]"
+    return "opus"
+  }
   if (model.includes("haiku")) return "haiku"
   return "sonnet"
+}
+
+let cachedSubscriptionType: string | undefined
+let cachedSubscriptionAt = 0
+
+async function getSubscriptionTypeCached(): Promise<string | undefined> {
+  const now = Date.now()
+  if (cachedSubscriptionType && now - cachedSubscriptionAt < 60_000) {
+    return cachedSubscriptionType
+  }
+  try {
+    const executable = claudeExecutable || await resolveClaudeExecutableAsync()
+    const escapedExecutable = executable.replaceAll('"', '\\"')
+    const command = executable.endsWith(".js")
+      ? `node "${escapedExecutable}" auth status`
+      : `"${escapedExecutable}" auth status`
+    const { stdout } = await exec(command, { timeout: 5000 })
+    const auth = JSON.parse(stdout)
+    cachedSubscriptionType = typeof auth.subscriptionType === "string" ? auth.subscriptionType : undefined
+    cachedSubscriptionAt = now
+    return cachedSubscriptionType
+  } catch {
+    return undefined
+  }
 }
 
 function isClosedControllerError(error: unknown): boolean {
@@ -510,7 +540,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
       try {
         const body = await c.req.json()
-        const model = mapModelToClaudeModel(body.model || "sonnet")
+        const subscriptionType = await getSubscriptionTypeCached()
+        const model = mapModelToClaudeModel(body.model || "sonnet", subscriptionType)
         const stream = body.stream ?? true
         const workingDirectory = process.env.CLAUDE_PROXY_WORKDIR || process.cwd()
         const passthrough = Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH)
@@ -603,7 +634,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // Detect when the model repeatedly calls the same tool with identical args.
       // Inspired by oh-my-openagent's loop-detector pattern.
       const LOOP_THRESHOLD = 3
-      let loopDetected = false
       if (allMessages.length >= LOOP_THRESHOLD * 2) {
         const toolCalls: string[] = []
         for (const m of allMessages) {
@@ -624,7 +654,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             else break
           }
           if (consecutive >= LOOP_THRESHOLD) {
-            loopDetected = true
             const toolName = last?.split("::")[0] || "unknown"
             systemContext += `\n\nCRITICAL: You have called the tool "${toolName}" ${consecutive} times consecutively with identical arguments. This is a loop. You MUST take a different action, use different arguments, or explain the situation to the user instead of calling the same tool again.`
             console.error(`[PROXY] Loop detected: ${toolName} called ${consecutive}x consecutively in session ${opencodeSessionId}`)
@@ -648,12 +677,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         return text
           .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
           .replace(/<task_metadata>[\s\S]*?<\/task_metadata>/gi, "")
+          .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+          .replace(/<tool_output\b[^>]*>[\s\S]*?<\/tool_output>/gi, "")
+          .replace(/<tool_exec\b[^>]*\/>/gi, "")
+          .replace(/<tool_exec\b[^>]*>[\s\S]*?<\/tool_exec>/gi, "")
           .replace(/<!--\s*OMO_INTERNAL_INITIATOR\s*-->/gi, "")
           .replace(/\[SYSTEM DIRECTIVE: OH-MY-OPENCODE[^\]]*\]/gi, "")
           .replace(/\[(?:ALL\s+)?BACKGROUND TASKS? COMPLETE\]/gi, "")
           .replace(/\[BACKGROUND TASK COMPLETED\]/gi, "")
           .replace(/SUPERVISED TASK (?:COMPLETED SUCCESSFULLY|FAILED \([^)]+\)|TIMED OUT)/gi, "")
           .replace(/\s*⚙\s*background_output\s*\[task_id=[^\]]+\]\s*/g, " ")
+          .replace(/(^|\n)\s*[HA]:\s*(?=<)/g, "$1")
+          .replace(/\b(?:H|A):\s*/g, "")
       }
 
       // --- Tool block summarization ---
@@ -860,7 +895,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           claudeLog("upstream.start", { mode: "non_stream", model })
 
           try {
-            // Lazy-resolve executable if not already set (e.g. when using createProxyServer directly)
             if (!claudeExecutable) {
               claudeExecutable = await resolveClaudeExecutableAsync()
             }
@@ -874,13 +908,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 pathToClaudeCodeExecutable: claudeExecutable,
                 permissionMode: "bypassPermissions",
                 allowDangerouslySkipPermissions: true,
-                // Pass OpenCode's system prompt (includes AGENTS.md, custom instructions)
-                // as an append to Claude Code's default — preserves the SDK identity.
                 ...(systemContext ? {
                   systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
                 } : {}),
-                // In passthrough mode: block ALL SDK built-in tools, use OpenCode's via MCP
-                // In normal mode: block built-ins, use our own MCP replacements
                 ...(passthrough
                   ? {
                       disallowedTools: [...BLOCKED_BUILTIN_TOOLS, ...CLAUDE_CODE_ONLY_TOOLS],
@@ -903,7 +933,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             })
 
             for await (const message of response) {
-              // Capture session ID from SDK messages
               if ((message as any).session_id) {
                 currentSessionId = (message as any).session_id
               }
@@ -918,14 +947,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   })
                 }
 
-                // Preserve ALL content blocks (text, tool_use, thinking, etc.)
                 for (const block of message.message.content) {
                   const b = block as Record<string, unknown>
                   if (b.type === "text" && typeof b.text === "string") {
                     b.text = sanitizeInternalMarkers(b.text)
                     if (!b.text) continue
                   }
-                  // In passthrough mode, strip MCP prefix from tool names
                   if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
                     b.name = stripMcpPrefix(b.name as string)
                   }
@@ -1013,7 +1040,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
 
-              return new Response(JSON.stringify({
+          return new Response(JSON.stringify({
             id: `msg_${Date.now()}`,
             type: "message",
             role: "assistant",
@@ -1443,7 +1470,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // Health check endpoint — verifies auth status
   app.get("/health", async (c) => {
     try {
-      const { stdout } = await exec("claude auth status", { timeout: 5000 })
+      const executable = claudeExecutable || await resolveClaudeExecutableAsync()
+      const escapedExecutable = executable.replaceAll('"', '\\"')
+      const command = executable.endsWith(".js")
+        ? `node "${escapedExecutable}" auth status`
+        : `"${escapedExecutable}" auth status`
+      const { stdout } = await exec(command, { timeout: 5000 })
       const auth = JSON.parse(stdout)
       if (!auth.loggedIn) {
         return c.json({
